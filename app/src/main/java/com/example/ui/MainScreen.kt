@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -13,6 +14,8 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -38,6 +41,47 @@ import com.example.data.CycleMetadata
 import com.example.data.DayRecord
 import com.example.data.WorkoutType
 
+data class MuscleRecoveryStatus(
+    val muscleName: String,
+    val isRecovering: Boolean,
+    val trainedDayNum: Int? = null,
+    val recoveryProgress: Float = 1.0f
+)
+
+fun calculateRecoveryStatuses(
+    dayRecords: List<DayRecord>,
+    workoutTypes: List<WorkoutType>,
+    targetDayIndex: Int
+): List<MuscleRecoveryStatus> {
+    return workoutTypes.map { workoutType ->
+        val prevDay1 = dayRecords.find { it.dayIndex == targetDayIndex - 1 }
+        val prevDay2 = dayRecords.find { it.dayIndex == targetDayIndex - 2 }
+        
+        val trainedDayIndex = when {
+            prevDay1?.isWorkoutDone == true && prevDay1.completedWorkoutType?.lowercase() == workoutType.name.lowercase() -> targetDayIndex - 1
+            prevDay2?.isWorkoutDone == true && prevDay2.completedWorkoutType?.lowercase() == workoutType.name.lowercase() -> targetDayIndex - 2
+            else -> null
+        }
+        
+        if (trainedDayIndex != null) {
+            val daysAgo = targetDayIndex - trainedDayIndex
+            val progress = daysAgo / 2.0f
+            MuscleRecoveryStatus(
+                muscleName = workoutType.name,
+                isRecovering = true,
+                trainedDayNum = trainedDayIndex + 1,
+                recoveryProgress = progress
+            )
+        } else {
+            MuscleRecoveryStatus(
+                muscleName = workoutType.name,
+                isRecovering = false,
+                recoveryProgress = 1.0f
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(viewModel: TrackerViewModel) {
@@ -45,8 +89,39 @@ fun MainScreen(viewModel: TrackerViewModel) {
     val workoutTypes by viewModel.allWorkoutTypes.collectAsStateWithLifecycle()
     val cycleMetadata by viewModel.cycleMetadata.collectAsStateWithLifecycle()
 
+    // Compute current day of cycle and check if completed (more than 28 days have elapsed)
+    val currentDayOfCycle = remember(cycleMetadata) {
+        if (cycleMetadata?.startDateMillis != null) {
+            val diff = System.currentTimeMillis() - cycleMetadata!!.startDateMillis
+            val calculated = (diff / (24 * 60 * 60 * 1000)).toInt()
+            (calculated + 1).coerceIn(1, 28)
+        } else {
+            1
+        }
+    }
+
+    val isCycleCompleted = remember(cycleMetadata) {
+        if (cycleMetadata?.startDateMillis != null) {
+            val diff = System.currentTimeMillis() - cycleMetadata!!.startDateMillis
+            val calculated = (diff / (24 * 60 * 60 * 1000)).toInt()
+            calculated >= 28
+        } else {
+            false
+        }
+    }
+
     var selectedWeekTab by remember { mutableStateOf(0) }
-    
+    LaunchedEffect(currentDayOfCycle) {
+        selectedWeekTab = ((currentDayOfCycle - 1) / 7).coerceIn(0, 3)
+    }
+
+    // Precompute / cache weekday names for the entire 28 days to prevent system Calendar allocations on every frame recomposition
+    val dayIndexToWeekdayMap = remember(dayRecords, cycleMetadata) {
+        (0 until 28).associateWith { dayIndex ->
+            viewModel.getWeekdayForDayIndex(dayIndex, cycleMetadata?.startDateMillis)
+        }
+    }
+
     // Theme setup
     val isDarkMode by viewModel.isDarkMode.collectAsStateWithLifecycle()
     val backgroundColor = if (isDarkMode) Color(0xFF0F172A) else Color(0xFFF3F4F9)
@@ -69,24 +144,21 @@ fun MainScreen(viewModel: TrackerViewModel) {
     var inlineSleepInput by remember { mutableStateOf("8.0") }
     var inlineSleepExpanded by remember { mutableStateOf(false) }
 
+    val activeProfile by viewModel.activeProfile.collectAsStateWithLifecycle()
+    val profiles by viewModel.profiles.collectAsStateWithLifecycle()
+    var selectedSectionTab by remember { mutableStateOf(0) }
+
     // Aggregate values
-    val totalWorkouts = dayRecords.count { it.isWorkoutDone }
-    val totalProgress = if (dayRecords.isNotEmpty()) totalWorkouts / 12f else 0f
-    
-    // Compute current day of cycle
-    val currentDayOfCycle = if (cycleMetadata?.startDateMillis != null) {
-        val diff = System.currentTimeMillis() - cycleMetadata!!.startDateMillis
-        val calculated = (diff / (24 * 60 * 60 * 1000)).toInt()
-        (calculated + 1).coerceIn(1, 28)
-    } else {
-        1
-    }
+    val totalWorkouts = remember(dayRecords) { dayRecords.count { it.isWorkoutDone } }
+    val totalProgress = remember(dayRecords, totalWorkouts) { if (dayRecords.isNotEmpty()) totalWorkouts / 12f else 0f }
 
     // Workouts completed per week (7 days per week)
-    val workoutsPerWeek = (0..3).map { weekIndex ->
-        val startDay = weekIndex * 7
-        val endDay = startDay + 7
-        dayRecords.filter { it.dayIndex in startDay until endDay && it.isWorkoutDone }.size
+    val workoutsPerWeek = remember(dayRecords) {
+        (0..3).map { weekIndex ->
+            val startDay = weekIndex * 7
+            val endDay = startDay + 7
+            dayRecords.filter { it.dayIndex in startDay until endDay && it.isWorkoutDone }.size
+        }
     }
 
     Scaffold(
@@ -106,12 +178,20 @@ fun MainScreen(viewModel: TrackerViewModel) {
                                 modifier = Modifier.size(28.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Resistance Log",
-                                fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.titleLarge,
-                                color = textColor
-                            )
+                            Column {
+                                Text(
+                                    text = "Resistance Log",
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    color = textColor
+                                )
+                                Text(
+                                    text = "Profile: $activeProfile",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = accentColor,
+                                    fontWeight = FontWeight.Black
+                                )
+                            }
                         }
                         
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -148,16 +228,119 @@ fun MainScreen(viewModel: TrackerViewModel) {
                 )
             )
         },
+        bottomBar = {
+            NavigationBar(
+                containerColor = cardBackground,
+                tonalElevation = 8.dp
+            ) {
+                NavigationBarItem(
+                    selected = selectedSectionTab == 0,
+                    onClick = { selectedSectionTab = 0 },
+                    icon = { Icon(Icons.Default.List, contentDescription = "Day Log Grid") },
+                    label = { Text("Log Grid", style = MaterialTheme.typography.labelSmall, fontWeight = if (selectedSectionTab == 0) FontWeight.Bold else FontWeight.Normal) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = accentColor,
+                        selectedTextColor = accentColor,
+                        unselectedIconColor = subtitleColor,
+                        unselectedTextColor = subtitleColor,
+                        indicatorColor = accentContainer
+                    )
+                )
+                NavigationBarItem(
+                    selected = selectedSectionTab == 1,
+                    onClick = { selectedSectionTab = 1 },
+                    icon = { Icon(Icons.Default.Star, contentDescription = "Progress Report") },
+                    label = { Text("Reports", style = MaterialTheme.typography.labelSmall, fontWeight = if (selectedSectionTab == 1) FontWeight.Bold else FontWeight.Normal) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = accentColor,
+                        selectedTextColor = accentColor,
+                        unselectedIconColor = subtitleColor,
+                        unselectedTextColor = subtitleColor,
+                        indicatorColor = accentContainer
+                    )
+                )
+                NavigationBarItem(
+                    selected = selectedSectionTab == 2,
+                    onClick = { selectedSectionTab = 2 },
+                    icon = { Icon(Icons.Default.Person, contentDescription = "Profiles & Settings") },
+                    label = { Text("Profiles", style = MaterialTheme.typography.labelSmall, fontWeight = if (selectedSectionTab == 2) FontWeight.Bold else FontWeight.Normal) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = accentColor,
+                        selectedTextColor = accentColor,
+                        unselectedIconColor = subtitleColor,
+                        unselectedTextColor = subtitleColor,
+                        indicatorColor = accentContainer
+                    )
+                )
+            }
+        },
         modifier = Modifier.fillMaxSize()
     ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .background(backgroundColor) // True "High Density" bg style
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp)
-        ) {
+        when (selectedSectionTab) {
+            0 -> {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                        .background(backgroundColor) // True "High Density" bg style
+                        .verticalScroll(rememberScrollState())
+                        .padding(16.dp)
+                ) {
+            if (isCycleCompleted) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp),
+                    shape = RoundedCornerShape(24.dp),
+                    colors = CardDefaults.cardColors(containerColor = if (isDarkMode) Color(0xFF1E3A8A) else Color(0xFFEFF6FF)),
+                    border = BorderStroke(2.dp, if (isDarkMode) Color(0xFF3B82F6) else Color(0xFF93C5FD))
+                ) {
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "🎉",
+                                fontSize = 24.sp,
+                                modifier = Modifier.padding(end = 12.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "CONGRATULATIONS!",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isDarkMode) Color(0xFF93C5FD) else Color(0xFF1D4ED8),
+                                    letterSpacing = 1.2.sp
+                                )
+                                Text(
+                                    text = "28-Day Cycle Completed",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Black,
+                                    color = if (isDarkMode) Color.White else Color(0xFF1E3A8A)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "You have completed your 4-week resistance training cycle! The program is calendar-month-agnostic: once a 28-day cycle finishes, you can start a new one to transition smoothly into the next month.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (isDarkMode) Color(0xFFBFDBFE) else Color(0xFF1E40AF)
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Button(
+                            onClick = { showResetConfirmDialog = true },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isDarkMode) Color(0xFF3B82F6) else Color(0xFF2563EB)
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Reset & Start Next Month's Cycle", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
             // High Density Cycle Progress Bar Section
             Card(
                 modifier = Modifier
@@ -250,9 +433,11 @@ fun MainScreen(viewModel: TrackerViewModel) {
             }
 
             // 7-day grid container styled beautifully with rounded cards
-            val weekStartIndex = selectedWeekTab * 7
-            val weekEndIndex = weekStartIndex + 7
-            val currentWeekRecords = dayRecords.filter { it.dayIndex in weekStartIndex until weekEndIndex }
+            val currentWeekRecords = remember(dayRecords, selectedWeekTab) {
+                val weekStartIndex = selectedWeekTab * 7
+                val weekEndIndex = weekStartIndex + 7
+                dayRecords.filter { it.dayIndex in weekStartIndex until weekEndIndex }
+            }
 
             Card(
                 modifier = Modifier
@@ -305,15 +490,17 @@ fun MainScreen(viewModel: TrackerViewModel) {
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                items(currentWeekRecords) { record ->
-                                    val weekdayName = viewModel.getWeekdayForDayIndex(record.dayIndex, cycleMetadata?.startDateMillis)
-                                    val dayNum = viewModel.getDayNumberForIndex(record.dayIndex)
+                                items(currentWeekRecords, key = { it.dayIndex }) { record ->
+                                    val weekdayName = dayIndexToWeekdayMap[record.dayIndex] ?: "Day ${record.dayIndex + 1}"
+                                    val dayNum = record.dayIndex + 1
+                                    val isToday = (record.dayIndex == currentDayOfCycle - 1) && !isCycleCompleted
                                     
                                     DayGridCellItem(
                                         record = record,
                                         weekdayName = weekdayName,
                                         dayNum = dayNum,
                                         isDarkMode = isDarkMode,
+                                        isToday = isToday,
                                         onClick = {
                                             selectedDayDetailRecord = record
                                         }
@@ -362,7 +549,7 @@ fun MainScreen(viewModel: TrackerViewModel) {
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        items(workoutTypes) { type ->
+                        items(workoutTypes, key = { it.id }) { type ->
                             InputChip(
                                 selected = false,
                                 onClick = {
@@ -459,7 +646,8 @@ fun MainScreen(viewModel: TrackerViewModel) {
                                     modifier = Modifier.height(180.dp)
                                 ) {
                                     dayRecords.forEach { record ->
-                                        val optLabel = "${viewModel.getWeekdayForDayIndex(record.dayIndex, cycleMetadata?.startDateMillis)} (Day ${viewModel.getDayNumberForIndex(record.dayIndex)})"
+                                        val weekdayForIndex = dayIndexToWeekdayMap[record.dayIndex] ?: "Day ${record.dayIndex + 1}"
+                                        val optLabel = "$weekdayForIndex (Day ${record.dayIndex + 1})"
                                         DropdownMenuItem(
                                             text = { Text(optLabel, fontSize = 12.sp) },
                                             onClick = {
@@ -758,6 +946,42 @@ fun MainScreen(viewModel: TrackerViewModel) {
             }
         }
     }
+        1 -> {
+            Box(modifier = Modifier.padding(innerPadding)) {
+                ProgressReportScreen(
+                    dayRecords = dayRecords,
+                    workoutTypes = workoutTypes,
+                    isDarkMode = isDarkMode,
+                    textColor = textColor,
+                    subtitleColor = subtitleColor,
+                    borderColor = borderColor,
+                    accentColor = accentColor,
+                    cardBackground = cardBackground,
+                    accentContainer = accentContainer,
+                    onAccentContainer = onAccentContainer
+                )
+            }
+        }
+        2 -> {
+            Box(modifier = Modifier.padding(innerPadding)) {
+                ProfilesAndSettingsScreen(
+                    activeProfile = activeProfile,
+                    profiles = profiles,
+                    viewModel = viewModel,
+                    isDarkMode = isDarkMode,
+                    textColor = textColor,
+                    subtitleColor = subtitleColor,
+                    borderColor = borderColor,
+                    accentColor = accentColor,
+                    cardBackground = cardBackground,
+                    accentContainer = accentContainer,
+                    onAccentContainer = onAccentContainer,
+                    showManageWorkoutsDialog = { showManageWorkoutsDialog = true }
+                )
+            }
+        }
+    }
+}
 
     // --- DAY DETAIL ACTIONS DIALOG ---
     selectedDayDetailRecord?.let { initialRecord ->
@@ -766,8 +990,10 @@ fun MainScreen(viewModel: TrackerViewModel) {
         DayDetailDialog(
             record = activeRecord,
             workoutTypes = workoutTypes,
-            getWeekday = { viewModel.getWeekdayForDayIndex(activeRecord.dayIndex, cycleMetadata?.startDateMillis) },
-            getDayNum = { viewModel.getDayNumberForIndex(activeRecord.dayIndex) },
+            dayRecords = dayRecords,
+            isDarkMode = isDarkMode,
+            getWeekday = { dayIndexToWeekdayMap[activeRecord.dayIndex] ?: "Day ${activeRecord.dayIndex + 1}" },
+            getDayNum = { activeRecord.dayIndex + 1 },
             onDismiss = { selectedDayDetailRecord = null },
             onUpdate = { updated ->
                 viewModel.updateDayRecord(updated)
@@ -818,8 +1044,8 @@ fun MainScreen(viewModel: TrackerViewModel) {
     if (showQuickSleepLogDialog) {
         QuickSleepLogDialog(
             dayRecords = dayRecords,
-            getWeekday = { viewModel.getWeekdayForDayIndex(it, cycleMetadata?.startDateMillis) },
-            getDayNum = { viewModel.getDayNumberForIndex(it) },
+            getWeekday = { dayIndexToWeekdayMap[it] ?: "Day ${it + 1}" },
+            getDayNum = { it + 1 },
             onLogSleep = { dayIndex, hours ->
                 val record = dayRecords.find { it.dayIndex == dayIndex }
                 if (record != null) {
@@ -840,6 +1066,7 @@ fun DayGridCellItem(
     weekdayName: String,
     dayNum: Int,
     isDarkMode: Boolean = false,
+    isToday: Boolean = false,
     onClick: () -> Unit
 ) {
     val isDone = record.isWorkoutDone
@@ -848,22 +1075,23 @@ fun DayGridCellItem(
 
     val containerColor = when {
         isDone -> if (isDarkMode) Color(0xFF064E3B) else Color(0xFFF0FDF4)
-        isRest -> if (isDarkMode) Color(0xFF1E293B) else Color(0xFFF1F5F9)
+        isRest -> if (isDarkMode) Color(0xFF1E2640) else Color(0xFFFFFBEB)
         else -> if (isDarkMode) Color(0xFF10172A) else Color.White
     }
 
     val contentColor = when {
         isDone -> if (isDarkMode) Color(0xFF34D399) else Color(0xFF166534)
-        isRest -> if (isDarkMode) Color(0xFF64748B) else Color(0xFF64748B)
+        isRest -> if (isDarkMode) Color(0xFFFBBF24) else Color(0xFFD97706)
         else -> if (isDarkMode) Color(0xFFC7D2FE) else Color(0xFF1E293B)
     }
 
     val borderStroke = when {
+        isToday -> BorderStroke(2.5.dp, if (isDarkMode) Color(0xFFFBBF24) else Color(0xFFEA580C))
         isDone -> BorderStroke(1.dp, if (isDarkMode) Color(0xFF047857) else Color(0xFFBBF7D0))
-        isRest -> BorderStroke(1.dp, if (isDarkMode) Color(0xFF334155) else Color(0xFFE2E8F0))
+        isRest -> BorderStroke(1.5.dp, if (isDarkMode) Color(0xFFB45309).copy(alpha = 0.5f) else Color(0xFFFDE68A))
         else -> BorderStroke(2.dp, if (isDarkMode) Color(0xFF818CF8) else Color(0xFFC7D2FE))
     }
-
+ 
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -879,7 +1107,7 @@ fun DayGridCellItem(
         ),
         border = borderStroke,
         shape = RoundedCornerShape(16.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (isRest) 0.dp else 1.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = if (isRest) 1.dp else 1.dp)
     ) {
         Column(
             modifier = Modifier
@@ -896,16 +1124,37 @@ fun DayGridCellItem(
                 color = contentColor.copy(alpha = 0.7f),
                 textAlign = TextAlign.Center
             )
-
-            // Huge day index number
-            Text(
-                text = "$dayNum",
-                fontSize = 19.sp,
-                fontWeight = FontWeight.Black,
-                color = contentColor,
-                textAlign = TextAlign.Center
-            )
-
+ 
+            // Huge day index number with highlighted container if today
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = if (isToday) {
+                    Modifier
+                        .size(31.dp)
+                        .background(
+                            color = if (isDarkMode) Color(0xFFFBBF24).copy(alpha = 0.2f) else Color(0xFFF59E0B).copy(alpha = 0.15f),
+                            shape = CircleShape
+                        )
+                        .border(
+                            width = 1.5.dp,
+                            color = if (isDarkMode) Color(0xFFFBBF24) else Color(0xFFEA580C),
+                            shape = CircleShape
+                        )
+                } else {
+                    Modifier
+                }
+            ) {
+                Text(
+                    text = "$dayNum",
+                    fontSize = if (isToday) 15.sp else 19.sp,
+                    fontWeight = FontWeight.Black,
+                    color = if (isToday) {
+                        if (isDarkMode) Color(0xFFFBBF24) else Color(0xFFC2410C)
+                    } else contentColor,
+                    textAlign = TextAlign.Center
+                )
+            }
+ 
             // Tiny indicator label at bottom
             Box(
                 modifier = Modifier.fillMaxWidth(),
@@ -928,14 +1177,14 @@ fun DayGridCellItem(
                             horizontalArrangement = Arrangement.Center
                         ) {
                             if (isExtraRest) {
-                                Text(text = "😴", fontSize = 8.sp)
-                                Spacer(modifier = Modifier.width(1.dp))
+                                Text(text = "🌌", fontSize = 8.sp)
+                                Spacer(modifier = Modifier.width(2.dp))
                             }
                             Text(
-                                text = if (isExtraRest) "REC" else "REST",
+                                text = if (isExtraRest) "EXTRA REC" else "RECOVERY",
                                 fontSize = 8.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = if (isDarkMode) Color(0xFF64748B) else Color(0xFF94A3B8)
+                                color = if (isDarkMode) Color(0xFFFBBF24) else Color(0xFFD97706)
                             )
                         }
                     }
@@ -977,6 +1226,8 @@ fun DayGridCellItem(
 fun DayDetailDialog(
     record: DayRecord,
     workoutTypes: List<WorkoutType>,
+    dayRecords: List<DayRecord>,
+    isDarkMode: Boolean,
     getWeekday: () -> String,
     getDayNum: () -> Int,
     onDismiss: () -> Unit,
@@ -985,18 +1236,24 @@ fun DayDetailDialog(
     var sleepInput by remember { mutableStateOf(record.sleepHours?.toString() ?: "8.0") }
     var selectedWorkoutType by remember { mutableStateOf(record.completedWorkoutType ?: record.assignedWorkoutType ?: workoutTypes.firstOrNull()?.name ?: "Upper") }
     var dropdownExpanded by remember { mutableStateOf(false) }
-    
-    // Warn override flag
-    var bypassWarning by remember { mutableStateOf(false) }
 
     val sleepVal = sleepInput.toFloatOrNull() ?: 8f
+
+    val dialogRecoveryStatuses = remember(dayRecords, workoutTypes, record.dayIndex) {
+        calculateRecoveryStatuses(dayRecords, workoutTypes, record.dayIndex)
+    }
+
+    val selectedStatus = dialogRecoveryStatuses.find { it.muscleName.lowercase() == selectedWorkoutType.lowercase() }
+    val isSelectedMuscleRecovering = selectedStatus?.isRecovering == true && !(record.isWorkoutDone && record.completedWorkoutType?.lowercase() == selectedWorkoutType.lowercase())
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp),
-            shape = RoundedCornerShape(24.dp)
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = if (isDarkMode) Color(0xFF1E293B) else Color.White),
+            border = BorderStroke(1.dp, if (isDarkMode) Color(0xFF334155) else Color(0xFFE2E8F0))
         ) {
             Column(
                 modifier = Modifier
@@ -1007,7 +1264,7 @@ fun DayDetailDialog(
                     text = "${getWeekday()} (Day ${getDayNum()}) Details",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
-                    color = Color(0xFF6750A4)
+                    color = if (isDarkMode) Color(0xFFD0BCFF) else Color(0xFF6750A4)
                 )
                 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
@@ -1015,7 +1272,7 @@ fun DayDetailDialog(
                 // CURRENT STATUS CARD
                 Surface(
                     shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    color = if (isDarkMode) Color(0xFF0F172A) else Color(0xFFF1F5F9),
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(bottom = 16.dp)
@@ -1024,25 +1281,150 @@ fun DayDetailDialog(
                         Text(
                             text = "Status: " + when {
                                 record.isWorkoutDone -> "Workout Complete! ✅"
-                                record.isRestDay -> "Rest Day 😴"
-                                else -> "Normal / Unscheduled"
+                                record.isRestDay -> "Rest/Recovery Day 🧘"
+                                else -> "Active Training Day"
                             },
                             fontWeight = FontWeight.Bold,
+                            color = if (isDarkMode) Color.White else Color(0xFF1E293B),
                             style = MaterialTheme.typography.bodyLarge
                         )
                         if (record.isWorkoutDone) {
                             Text(
-                                text = "Logged workout: ${record.completedWorkoutType}",
-                                style = MaterialTheme.typography.bodySmall
+                                text = "Completed Workout: ${record.completedWorkoutType}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (isDarkMode) Color(0xFF4ADE80) else Color(0xFF15803D),
+                                fontWeight = FontWeight.Bold
+                            )
+                        } else if (record.assignedWorkoutType != null) {
+                            Text(
+                                text = "Planned Habit: ${record.assignedWorkoutType}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (isDarkMode) Color(0xFF818CF8) else Color(0xFF4F46E5),
+                                fontWeight = FontWeight.Bold
                             )
                         }
                     }
                 }
 
+                // SMART RECOVERY TRACKER FOR THIS DAY (COLLAPSIBLE BY DEFAULT)
+                var isSmartRecoveryExpanded by remember { mutableStateOf(false) }
+                
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isDarkMode) Color(0xFF0F172A).copy(alpha = 0.5f) else Color(0xFFF8FAFC)
+                    ),
+                    border = BorderStroke(1.dp, if (isDarkMode) Color(0xFF334155) else Color(0xFFE2E8F0))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { isSmartRecoveryExpanded = !isSmartRecoveryExpanded },
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "🧠",
+                                    fontSize = 14.sp,
+                                    modifier = Modifier.padding(end = 6.dp)
+                                )
+                                Text(
+                                    text = "Smart Recovery Advisor",
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (isDarkMode) Color(0xFFD0BCFF) else Color(0xFF6750A4)
+                                )
+                            }
+                            Text(
+                                text = if (isSmartRecoveryExpanded) "Collapse ▲" else "Expand ▼",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (isDarkMode) Color(0xFF94A3B8) else Color(0xFF64748B)
+                            )
+                        }
+                        
+                        if (isSmartRecoveryExpanded) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                dialogRecoveryStatuses.forEach { status ->
+                                    val isSelfCompleteForThisDay = record.isWorkoutDone && record.completedWorkoutType?.lowercase() == status.muscleName.lowercase()
+                                    val recovering = status.isRecovering && !isSelfCompleteForThisDay
+                                    
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .background(
+                                                if (recovering) {
+                                                    if (isDarkMode) Color(0xFF3F1D20) else Color(0xFFFFF1F2)
+                                                } else {
+                                                    if (isDarkMode) Color(0xFF064E3B).copy(alpha = 0.4f) else Color(0xFFF0FDF4)
+                                                },
+                                                shape = RoundedCornerShape(8.dp)
+                                            )
+                                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = if (recovering) "🛑" else "🟢",
+                                                fontSize = 11.sp,
+                                                modifier = Modifier.padding(end = 6.dp)
+                                            )
+                                            Text(
+                                                text = status.muscleName,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.sp,
+                                                color = if (isDarkMode) Color.White else Color(0xFF1E293B)
+                                            )
+                                        }
+                                        Text(
+                                            text = if (recovering) {
+                                                val daysLeft = if (status.trainedDayNum != null) {
+                                                    val age = record.dayIndex - (status.trainedDayNum - 1)
+                                                    if (age == 1) "1 day left" else "2 days left"
+                                                } else {
+                                                    "Recovering"
+                                                }
+                                                "Recovering ($daysLeft) ⏳"
+                                            } else {
+                                                "Ready to Train! ✅"
+                                            },
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (recovering) {
+                                                if (isDarkMode) Color(0xFFFCA5A5) else Color(0xFFB91C1C)
+                                            } else {
+                                                if (isDarkMode) Color(0xFF86EFAC) else Color(0xFF166534)
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "Daily muscle rest & fatigue tracker (Hidden - Tap to expand)",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontSize = 10.sp,
+                                color = if (isDarkMode) Color(0xFF94A3B8) else Color(0xFF64748B)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
                 // SLEEP MANUAL HOURS INPUT
                 Text(
                     text = "Sleep hours night before",
                     fontWeight = FontWeight.Bold,
+                    color = if (isDarkMode) Color.White else Color(0xFF1E293B),
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Spacer(modifier = Modifier.height(4.dp))
@@ -1056,7 +1438,11 @@ fun DayDetailDialog(
                         modifier = Modifier.weight(1f),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         label = { Text("Hours slept") },
-                        singleLine = true
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = if (isDarkMode) Color.White else Color.Black,
+                            unfocusedTextColor = if (isDarkMode) Color.White else Color.Black
+                        )
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     TextButton(onClick = { sleepInput = "8.0" }) { Text("8h") }
@@ -1065,64 +1451,18 @@ fun DayDetailDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // RECOVERY OVERRIDE WARNING
-                val isRestAndNotDone = record.isRestDay && !record.isWorkoutDone
-                if (isRestAndNotDone && !bypassWarning) {
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.errorContainer,
-                            contentColor = MaterialTheme.colorScheme.onErrorContainer
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 16.dp)
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Rest Day Warning!",
-                                    fontWeight = FontWeight.Bold,
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "Muscles grow and repair during rest days, not workout days. Working out on scheduled rest days impacts physical recovery and significantly increases risk of overtraining or joint injury.",
-                                style = MaterialTheme.typography.bodySmall,
-                                lineHeight = 16.sp
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End
-                            ) {
-                                TextButton(
-                                    onClick = { bypassWarning = true },
-                                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                                ) {
-                                    Text("Dismiss Warning & Unlock")
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // WORKOUT SELECTOR (Disabled if rest day and bypass warning was not checked)
-                val allowLogWorkout = !isRestAndNotDone || bypassWarning
-                
+                // WORKOUT SELECTOR
                 Text(
-                    text = "Workout Type",
+                    text = "Select Muscle / Routine Definition",
                     fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (allowLogWorkout) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                    color = if (isDarkMode) Color.White else Color(0xFF1E293B),
+                    style = MaterialTheme.typography.bodyMedium
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 
                 ExposedDropdownMenuBox(
-                    expanded = dropdownExpanded && allowLogWorkout,
-                    onExpandedChange = { if (allowLogWorkout) dropdownExpanded = it }
+                    expanded = dropdownExpanded,
+                    onExpandedChange = { dropdownExpanded = it }
                 ) {
                     OutlinedTextField(
                         value = selectedWorkoutType,
@@ -1132,20 +1472,35 @@ fun DayDetailDialog(
                         modifier = Modifier
                             .fillMaxWidth()
                             .menuAnchor(),
-                        colors = if (allowLogWorkout) OutlinedTextFieldDefaults.colors() else OutlinedTextFieldDefaults.colors(
-                            disabledContainerColor = Color.Transparent,
-                            disabledBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
-                            disabledTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
-                        ),
-                        enabled = allowLogWorkout
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = if (isDarkMode) Color.White else Color.Black,
+                            unfocusedTextColor = if (isDarkMode) Color.White else Color.Black
+                        )
                     )
                     ExposedDropdownMenu(
-                        expanded = dropdownExpanded && allowLogWorkout,
-                        onDismissRequest = { dropdownExpanded = false }
+                        expanded = dropdownExpanded,
+                        onDismissRequest = { dropdownExpanded = false },
+                        modifier = Modifier.background(if (isDarkMode) Color(0xFF1E293B) else Color.White)
                     ) {
                         workoutTypes.forEach { type ->
+                            val typeStatus = dialogRecoveryStatuses.find { it.muscleName.lowercase() == type.name.lowercase() }
+                            val isTypeSelfDone = record.isWorkoutDone && record.completedWorkoutType?.lowercase() == type.name.lowercase()
+                            val isTypeRecovering = typeStatus?.isRecovering == true && !isTypeSelfDone
+                            val labelSuffix = if (isTypeRecovering) " (⏳ Recovering)" else " (✅ Ready)"
                             DropdownMenuItem(
-                                text = { Text(type.name) },
+                                text = { 
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = type.name + labelSuffix,
+                                            fontWeight = if (isTypeRecovering) FontWeight.Medium else FontWeight.Bold,
+                                            color = if (isTypeRecovering) {
+                                                if (isDarkMode) Color(0xFFFCA5A5) else Color(0xFFB91C1C)
+                                            } else {
+                                                if (isDarkMode) Color(0xFF86EFAC) else Color(0xFF166534)
+                                            }
+                                        )
+                                    }
+                                },
                                 onClick = {
                                     selectedWorkoutType = type.name
                                     dropdownExpanded = false
@@ -1155,18 +1510,56 @@ fun DayDetailDialog(
                     }
                 }
 
+                // SMART RECOVERY DYNAMIC WARNING (FRIENDLY NOT LOCKING)
+                if (isSelectedMuscleRecovering) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isDarkMode) Color(0xFF452B1E) else Color(0xFFFFFBEB),
+                            contentColor = if (isDarkMode) Color(0xFFFFE0B2) else Color(0xFF92400E)
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                        border = BorderStroke(1.dp, if (isDarkMode) Color(0xFFB45309).copy(alpha = 0.5f) else Color(0xFFFDE68A)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFFD97706))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Isometrics Recovery Overlap!",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp,
+                                    letterSpacing = 0.5.sp
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Selected workout group '$selectedWorkoutType' is currently in recovery from a previous workout. You may still log it, but standard smart recommendations encourage choosing another available muscle group.",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontSize = 10.sp,
+                                lineHeight = 14.sp
+                            )
+                        }
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(24.dp))
 
-                // ACTION BUTTONS
+                // ACTION BUTTONS (NO LOCKS/GREY BLOCKS!)
                 if (record.isWorkoutDone) {
                     Button(
                         onClick = {
-                            onUpdate(record.copy(sleepHours = sleepVal, completedWorkoutType = selectedWorkoutType))
+                            onUpdate(record.copy(
+                                sleepHours = sleepVal,
+                                completedWorkoutType = selectedWorkoutType
+                            ))
                             onDismiss()
                         },
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = if (isDarkMode) Color(0xFF3B82F6) else Color(0xFF2563EB))
                     ) {
-                        Text("Save Details")
+                        Text("Save Completed Details", fontWeight = FontWeight.Bold)
                     }
                     
                     Spacer(modifier = Modifier.height(8.dp))
@@ -1182,7 +1575,7 @@ fun DayDetailDialog(
                     ) {
                         Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Undo Workout Log")
+                        Text("Undo Completed Workout Log")
                     }
                 } else {
                     Button(
@@ -1195,15 +1588,14 @@ fun DayDetailDialog(
                             ))
                             onDismiss()
                         },
-                        enabled = allowLogWorkout,
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isRestAndNotDone) MaterialTheme.colorScheme.error else Color(0xFF6750A4)
+                            containerColor = if (isDarkMode) Color(0xFF10B981) else Color(0xFF059669)
                         )
                     ) {
-                        Icon(Icons.Default.Check, contentDescription = null)
+                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text(if (isRestAndNotDone) "Confirm Overridden Workout" else "Mark Workout Done")
+                        Text("Mark Workout Completed (Log Done)", fontWeight = FontWeight.Bold)
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
@@ -1218,17 +1610,17 @@ fun DayDetailDialog(
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Pre-Assign Plan / Save Sleep Only")
+                        Text("Change Planned Habit / Save Sleep")
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
                 TextButton(
                     onClick = onDismiss,
                     modifier = Modifier.align(Alignment.CenterHorizontally)
                 ) {
-                    Text("Close")
+                    Text("Close", color = if (isDarkMode) Color(0xFF94A3B8) else Color(0xFF64748B))
                 }
             }
         }
@@ -1289,7 +1681,7 @@ fun ManageWorkoutsDialog(
                         )
                     } else {
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
-                            items(workoutTypes) { type ->
+                            items(workoutTypes, key = { it.id }) { type ->
                                 val isEditing = editingWorkoutId == type.id
                                 Row(
                                     modifier = Modifier
@@ -1532,3 +1924,703 @@ fun QuickSleepLogDialog(
         }
     }
 }
+
+@Composable
+fun ProgressReportScreen(
+    dayRecords: List<DayRecord>,
+    workoutTypes: List<WorkoutType>,
+    isDarkMode: Boolean,
+    textColor: Color,
+    subtitleColor: Color,
+    borderColor: Color,
+    accentColor: Color,
+    cardBackground: Color,
+    accentContainer: Color,
+    onAccentContainer: Color
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+        // Title area
+        Text(
+            text = "Progress Analytics Report",
+            fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.headlineSmall,
+            color = textColor,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+        Text(
+            text = "Comprehensive analytics based on active profile logging metrics",
+            style = MaterialTheme.typography.bodySmall,
+            color = subtitleColor,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        // General Stats Summary Grid
+        val completedDays = dayRecords.count { it.isWorkoutDone }
+        val restDays = dayRecords.count { it.isRestDay }
+        val avgSleep = if (dayRecords.any { it.sleepHours != null }) {
+            dayRecords.filter { it.sleepHours != null }.map { it.sleepHours!! }.average()
+        } else 8.0
+
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = cardBackground),
+            border = BorderStroke(1.dp, borderColor)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "CYCLE OVERVIEW STATISTICS",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = accentColor,
+                    letterSpacing = 1.2.sp
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
+                        Text(text = "💪", fontSize = 24.sp)
+                        Text(text = "$completedDays", fontWeight = FontWeight.Black, fontSize = 20.sp, color = textColor)
+                        Text(text = "Workouts Done", fontSize = 11.sp, color = subtitleColor)
+                    }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
+                        Text(text = "🛌", fontSize = 24.sp)
+                        Text(text = "$restDays", fontWeight = FontWeight.Black, fontSize = 20.sp, color = textColor)
+                        Text(text = "Rest Days", fontSize = 11.sp, color = subtitleColor)
+                    }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
+                        Text(text = "💤", fontSize = 24.sp)
+                        Text(text = "%.1f hrs".format(avgSleep), fontWeight = FontWeight.Black, fontSize = 20.sp, color = textColor)
+                        Text(text = "Avg Sleep", fontSize = 11.sp, color = subtitleColor)
+                    }
+                }
+            }
+        }
+
+        // Workout breakdown lists
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = cardBackground),
+            border = BorderStroke(1.dp, borderColor)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "ROUTINE TRAINING COMPONENT BREAKDOWN",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = accentColor,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+
+                if (workoutTypes.isEmpty()) {
+                    Text(
+                        text = "No routines defined yet. Create custom workout definitions inside Profiles & Settings tab list.",
+                        color = subtitleColor,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                } else {
+                    workoutTypes.forEach { type ->
+                        val count = dayRecords.count { it.isWorkoutDone && it.completedWorkoutType?.lowercase() == type.name.lowercase() }
+                        
+                        Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .background(accentColor, shape = CircleShape)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = type.name,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        color = textColor
+                                    )
+                                }
+                                Text(
+                                    text = "$count Logs",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    color = accentColor
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            
+                            // Progress indicator
+                            val factor = if (completedDays > 0) count.toFloat() / completedDays else 0f
+                            LinearProgressIndicator(
+                                progress = { factor.coerceIn(0f, 1f) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(6.dp)
+                                    .clip(RoundedCornerShape(3.dp)),
+                                color = accentColor,
+                                trackColor = borderColor
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "Target allocation frequency",
+                                    fontSize = 10.sp,
+                                    color = subtitleColor
+                                )
+                                Text(
+                                    text = "${(factor * 100).toInt()}% of workouts",
+                                    fontSize = 10.sp,
+                                    color = subtitleColor,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Workout Log list visualization (Historical Records inline list)
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = cardBackground),
+            border = BorderStroke(1.dp, borderColor)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "HISTORICAL ACTIVITY CHRONOLOGY",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = accentColor,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+
+                val activeLogs = dayRecords.filter { it.isWorkoutDone || it.isRestDay }.sortedBy { it.dayIndex }
+                if (activeLogs.isEmpty()) {
+                    Text(
+                        text = "History logs will be illustrated here dynamically as you track days.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = subtitleColor
+                    )
+                } else {
+                    activeLogs.takeLast(7).forEach { record ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = if (record.isWorkoutDone) "💪" else "🛌",
+                                    fontSize = 14.sp,
+                                    modifier = Modifier.padding(end = 8.dp)
+                                )
+                                Column {
+                                    Text(
+                                        text = "Day ${record.dayIndex + 1} - " + (if (record.isWorkoutDone) (record.completedWorkoutType ?: "Workout Finished") else "Rest Interval"),
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 12.sp,
+                                        color = textColor
+                                    )
+                                    Text(
+                                        text = "Sleep: ${record.sleepHours ?: 8.0} hours completed",
+                                        fontSize = 10.sp,
+                                        color = subtitleColor
+                                    )
+                                }
+                            }
+                            
+                            Box(
+                                modifier = Modifier
+                                    .background(
+                                        if (record.isWorkoutDone) accentContainer else borderColor,
+                                        shape = RoundedCornerShape(4.dp)
+                                    )
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = if (record.isWorkoutDone) "TRAINED" else "REST",
+                                    color = if (record.isWorkoutDone) onAccentContainer else textColor,
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ProfilesAndSettingsScreen(
+    activeProfile: String,
+    profiles: List<String>,
+    viewModel: TrackerViewModel,
+    isDarkMode: Boolean,
+    textColor: Color,
+    subtitleColor: Color,
+    borderColor: Color,
+    accentColor: Color,
+    cardBackground: Color,
+    accentContainer: Color,
+    onAccentContainer: Color,
+    showManageWorkoutsDialog: () -> Unit
+) {
+    var newProfileName by remember { mutableStateOf("") }
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    val reminderEnabled by viewModel.reminderEnabled.collectAsStateWithLifecycle()
+    val reminderHour by viewModel.reminderHour.collectAsStateWithLifecycle()
+    val reminderMinute by viewModel.reminderMinute.collectAsStateWithLifecycle()
+
+    var editReminderEnabled by remember(reminderEnabled) { mutableStateOf(reminderEnabled) }
+    var editHour by remember(reminderHour) { mutableStateOf(reminderHour) }
+    var editMinute by remember(reminderMinute) { mutableStateOf(reminderMinute) }
+
+    val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            viewModel.updateReminderSettings(true, editHour, editMinute)
+        } else {
+            editReminderEnabled = false
+            viewModel.updateReminderSettings(false, editHour, editMinute)
+            android.widget.Toast.makeText(context, "Notification permission is required for reminders.", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+        // Title area
+        Text(
+            text = "Profiles & Settings",
+            fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.headlineSmall,
+            color = textColor,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+        Text(
+            text = "Establish profiles and daily customized push remind options",
+            style = MaterialTheme.typography.bodySmall,
+            color = subtitleColor,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        // Active Profile details Card
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = cardBackground),
+            border = BorderStroke(2.dp, accentColor)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .background(accentContainer, shape = CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = activeProfile.take(1).uppercase(),
+                        fontWeight = FontWeight.Black,
+                        fontSize = 18.sp,
+                        color = onAccentContainer
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Column {
+                    Text(
+                        text = "ACTIVE PROFILE IN SESSION",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = accentColor
+                    )
+                    Text(
+                        text = activeProfile,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 18.sp,
+                        color = textColor
+                    )
+                }
+            }
+        }
+
+        // Choose / Switch Profile list
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = cardBackground),
+            border = BorderStroke(1.dp, borderColor)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Profiles Directory List",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    color = textColor,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+
+                profiles.forEach { profile ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp)
+                            .background(
+                                if (profile == activeProfile) accentContainer.copy(alpha = 0.3f) else Color.Transparent,
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "👤",
+                                fontSize = 14.sp,
+                                modifier = Modifier.padding(end = 8.dp)
+                            )
+                            Text(
+                                text = profile,
+                                fontWeight = if (profile == activeProfile) FontWeight.Bold else FontWeight.Medium,
+                                fontSize = 13.sp,
+                                color = textColor
+                            )
+                        }
+
+                        if (profile == activeProfile) {
+                            Box(
+                                modifier = Modifier
+                                    .background(accentColor, shape = RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = "ACTIVE",
+                                    color = Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = { 
+                                    viewModel.switchProfile(profile)
+                                    android.widget.Toast.makeText(context, "Switched plan profile to $profile", android.widget.Toast.LENGTH_SHORT).show()
+                                },
+                                shape = RoundedCornerShape(6.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Text("Switch", fontSize = 11.sp, color = accentColor)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add brand new profile Section
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = cardBackground),
+            border = BorderStroke(1.dp, borderColor)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Plan New Profile Setup",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    color = textColor,
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
+                Text(
+                    text = "Configure a blank isolated 28-day logging space",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = subtitleColor,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+
+                OutlinedTextField(
+                    value = newProfileName,
+                    onValueChange = { newProfileName = it },
+                    placeholder = { Text("e.g. Upper Split, Running Tracker") },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = accentColor,
+                        unfocusedBorderColor = borderColor
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = {
+                        val nameClean = newProfileName.trim()
+                        if (nameClean.isEmpty()) {
+                            android.widget.Toast.makeText(context, "Profile name cannot be blank.", android.widget.Toast.LENGTH_SHORT).show()
+                        } else if (profiles.contains(nameClean)) {
+                            android.widget.Toast.makeText(context, "Profile already exists.", android.widget.Toast.LENGTH_SHORT).show()
+                        } else {
+                            viewModel.addNewProfile(nameClean)
+                            android.widget.Toast.makeText(context, "Profile created: $nameClean", android.widget.Toast.LENGTH_SHORT).show()
+                            newProfileName = ""
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = accentColor),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("➕ Add as New Plan Profile", fontWeight = FontWeight.Bold, color = Color.White)
+                }
+            }
+        }
+
+        // Daily Reminder Settings Section (M3 design Card)
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = cardBackground),
+            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+            border = BorderStroke(1.dp, borderColor)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Icon(
+                            imageVector = Icons.Default.Notifications,
+                            contentDescription = "Reminder Icon",
+                            tint = accentColor,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text(
+                                text = "Daily Logging Reminder",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                color = textColor
+                            )
+                            Text(
+                                text = if (reminderEnabled) "Scheduled for %02d:%02d".format(reminderHour, reminderMinute) else "Off / Disabled",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = subtitleColor,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                    
+                    Switch(
+                        checked = editReminderEnabled,
+                        onCheckedChange = { isChecked ->
+                            editReminderEnabled = isChecked
+                            if (isChecked) {
+                                if (android.os.Build.VERSION.SDK_INT >= 33) {
+                                    val hasPermission = androidx.core.content.ContextCompat.checkSelfPermission(
+                                        context,
+                                        android.Manifest.permission.POST_NOTIFICATIONS
+                                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                    if (hasPermission) {
+                                        viewModel.updateReminderSettings(true, editHour, editMinute)
+                                    } else {
+                                        permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                                    }
+                                } else {
+                                    viewModel.updateReminderSettings(true, editHour, editMinute)
+                                }
+                            } else {
+                                viewModel.updateReminderSettings(false, editHour, editMinute)
+                            }
+                        }
+                    )
+                }
+
+                // Expandable scheduler config time adjustments
+                AnimatedVisibility(visible = editReminderEnabled) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp)
+                    ) {
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = borderColor)
+                        
+                        Text(
+                            text = "Set Daily Frequency Time:",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = subtitleColor
+                        )
+                        
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            // Hour modification buttons
+                            Button(
+                                onClick = { editHour = (editHour - 1 + 24) % 24 },
+                                colors = ButtonDefaults.buttonColors(containerColor = accentContainer, contentColor = onAccentContainer),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp),
+                                modifier = Modifier.defaultMinSize(minHeight = 32.dp)
+                            ) {
+                                Text("-", fontWeight = FontWeight.Bold)
+                            }
+                            
+                            Text(
+                                text = "%02d".format(editHour),
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Black,
+                                color = textColor,
+                                modifier = Modifier.padding(horizontal = 12.dp)
+                            )
+                            
+                            Button(
+                                onClick = { editHour = (editHour + 1) % 24 },
+                                colors = ButtonDefaults.buttonColors(containerColor = accentContainer, contentColor = onAccentContainer),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp),
+                                modifier = Modifier.defaultMinSize(minHeight = 32.dp)
+                            ) {
+                                Text("+", fontWeight = FontWeight.Bold)
+                            }
+                            
+                            Text(
+                                text = ":",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = textColor,
+                                modifier = Modifier.padding(horizontal = 8.dp)
+                            )
+
+                            // Minute modification buttons
+                            Button(
+                                onClick = { editMinute = (editMinute - 5 + 60) % 60 },
+                                colors = ButtonDefaults.buttonColors(containerColor = accentContainer, contentColor = onAccentContainer),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp),
+                                modifier = Modifier.defaultMinSize(minHeight = 32.dp)
+                            ) {
+                                Text("-5m", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            
+                            Text(
+                                text = "%02d".format(editMinute),
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Black,
+                                color = textColor,
+                                modifier = Modifier.padding(horizontal = 12.dp)
+                            )
+                            
+                            Button(
+                                onClick = { editMinute = (editMinute + 5) % 60 },
+                                colors = ButtonDefaults.buttonColors(containerColor = accentContainer, contentColor = onAccentContainer),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp),
+                                modifier = Modifier.defaultMinSize(minHeight = 32.dp)
+                            ) {
+                                Text("+5m", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        Button(
+                            onClick = {
+                                viewModel.updateReminderSettings(true, editHour, editMinute)
+                                android.widget.Toast.makeText(context, "Reminder scheduled successfully!", android.widget.Toast.LENGTH_SHORT).show()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = accentColor),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Update Alarm Time", fontWeight = FontWeight.Bold, color = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Customize workouts definition launcher row
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = cardBackground),
+            border = BorderStroke(1.dp, borderColor)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Workout Routines Master List",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    color = textColor,
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
+                Text(
+                    text = "Tweak customize labels representing different muscle splits standard definitions in this active workspace profile.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = subtitleColor,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+                
+                Button(
+                    onClick = { showManageWorkoutsDialog() },
+                    colors = ButtonDefaults.buttonColors(containerColor = accentContainer, contentColor = onAccentContainer),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Edit Workout splits labels list in profile", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+

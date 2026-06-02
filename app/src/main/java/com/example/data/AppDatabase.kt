@@ -18,22 +18,30 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun trackerDao(): TrackerDao
 
     companion object {
-        @Volatile
-        private var INSTANCE: AppDatabase? = null
+        private val INSTANCES = java.util.concurrent.ConcurrentHashMap<String, AppDatabase>()
 
         fun getDatabase(context: Context, scope: CoroutineScope): AppDatabase {
-            return INSTANCE ?: synchronized(this) {
-                val instance = Room.databaseBuilder(
+            return getDatabase(context, scope, "Default")
+        }
+
+        fun getDatabase(context: Context, scope: CoroutineScope, profileName: String): AppDatabase {
+            val dbName = if (profileName == "Default" || profileName.isBlank()) {
+                "resistance_tracker_database"
+            } else {
+                "resistance_tracker_database_${profileName.trim().lowercase().replace(Regex("[^a-z0-9_]"), "_")}"
+            }
+            return INSTANCES.getOrPut(dbName) {
+                Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
-                    "resistance_tracker_database"
+                    dbName
                 )
                 .addCallback(object : RoomDatabase.Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
                         super.onCreate(db)
                         // Prepopulate on background coroutine
                         scope.launch(Dispatchers.IO) {
-                            val database = getDatabase(context, scope)
+                            val database = getDatabase(context, scope, profileName)
                             val dao = database.trackerDao()
                             
                             // Initialize 28 blank days
@@ -51,8 +59,6 @@ abstract class AppDatabase : RoomDatabase() {
                     }
                 })
                 .build()
-                INSTANCE = instance
-                instance
             }
         }
     }

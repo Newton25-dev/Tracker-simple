@@ -13,14 +13,42 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.util.Calendar
 
+@kotlinx.coroutines.ExperimentalCoroutinesApi
 class TrackerViewModel(application: Application) : AndroidViewModel(application) {
-    private val repository: TrackerRepository
-
-    val allDayRecords: StateFlow<List<DayRecord>>
-    val allWorkoutTypes: StateFlow<List<WorkoutType>>
-    val cycleMetadata: StateFlow<CycleMetadata?>
-
     private val sharedPrefs = application.getSharedPreferences("resistance_log_prefs", Context.MODE_PRIVATE)
+
+    private val _activeProfile = MutableStateFlow(sharedPrefs.getString("active_profile", "Default") ?: "Default")
+    val activeProfile: StateFlow<String> = _activeProfile.asStateFlow()
+
+    private val _profiles = MutableStateFlow(
+        sharedPrefs.getStringSet("profiles_list", setOf("Default"))?.toList() ?: listOf("Default")
+    )
+    val profiles: StateFlow<List<String>> = _profiles.asStateFlow()
+
+    private val currentRepository: StateFlow<TrackerRepository> = _activeProfile.map { profile ->
+        val database = AppDatabase.getDatabase(application, viewModelScope, profile)
+        val rep = TrackerRepository(database.trackerDao())
+        viewModelScope.launch {
+            rep.ensureDatabaseInitialized()
+        }
+        rep
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.Eagerly,
+        TrackerRepository(AppDatabase.getDatabase(application, viewModelScope, _activeProfile.value).trackerDao())
+    )
+
+    val allDayRecords: StateFlow<List<DayRecord>> = currentRepository.flatMapLatest { rep ->
+        rep.allDayRecords
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val allWorkoutTypes: StateFlow<List<WorkoutType>> = currentRepository.flatMapLatest { rep ->
+        rep.allWorkoutTypes
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val cycleMetadata: StateFlow<CycleMetadata?> = currentRepository.flatMapLatest { rep ->
+        rep.cycleMetadata
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     private val _isDarkMode = MutableStateFlow(sharedPrefs.getBoolean("dark_mode_enabled", false))
     val isDarkMode: StateFlow<Boolean> = _isDarkMode.asStateFlow()
@@ -34,33 +62,33 @@ class TrackerViewModel(application: Application) : AndroidViewModel(application)
     private val _reminderMinute = MutableStateFlow(sharedPrefs.getInt("reminder_minute", 0))
     val reminderMinute: StateFlow<Int> = _reminderMinute.asStateFlow()
 
-    init {
-        val database = AppDatabase.getDatabase(application, viewModelScope)
-        repository = TrackerRepository(database.trackerDao())
-        
-        allDayRecords = repository.allDayRecords
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-            
-        allWorkoutTypes = repository.allWorkoutTypes
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-            
-        cycleMetadata = repository.cycleMetadata
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+    fun addNewProfile(profileName: String) {
+        val trimmed = profileName.trim()
+        if (trimmed.isNotBlank() && !_profiles.value.contains(trimmed)) {
+            val newList = _profiles.value + trimmed
+            _profiles.value = newList
+            sharedPrefs.edit().putStringSet("profiles_list", newList.toSet()).apply()
+            switchProfile(trimmed)
+        }
+    }
 
-        viewModelScope.launch {
-            repository.ensureDatabaseInitialized()
+    fun switchProfile(profileName: String) {
+        if (_profiles.value.contains(profileName)) {
+            _activeProfile.value = profileName
+            sharedPrefs.edit().putString("active_profile", profileName).apply()
         }
     }
 
     // Save/Update Day Record & Recalculate Rest Status for the entire cycle
     fun updateDayRecord(dayRecord: DayRecord) {
         viewModelScope.launch {
-            val currentRecords = repository.getDayRecordsDirect()
+            val rep = currentRepository.value
+            val currentRecords = rep.getDayRecordsDirect()
             val updatedList = currentRecords.map {
                 if (it.dayIndex == dayRecord.dayIndex) dayRecord else it
             }
             val recalculatedList = recalculateCycleRestDays(updatedList)
-            repository.insertDayRecords(recalculatedList)
+            rep.insertDayRecords(recalculatedList)
         }
     }
 
@@ -73,7 +101,7 @@ class TrackerViewModel(application: Application) : AndroidViewModel(application)
     fun addWorkoutType(name: String) {
         viewModelScope.launch {
             if (name.isNotBlank()) {
-                repository.addWorkoutType(name.trim())
+                currentRepository.value.addWorkoutType(name.trim())
             }
         }
     }
@@ -81,20 +109,20 @@ class TrackerViewModel(application: Application) : AndroidViewModel(application)
     fun updateWorkoutType(workoutType: WorkoutType) {
         viewModelScope.launch {
             if (workoutType.name.isNotBlank()) {
-                repository.updateWorkoutType(workoutType)
+                currentRepository.value.updateWorkoutType(workoutType)
             }
         }
     }
 
     fun deleteWorkoutType(id: Int) {
         viewModelScope.launch {
-            repository.deleteWorkoutType(id)
+            currentRepository.value.deleteWorkoutType(id)
         }
     }
 
     fun resetCycle() {
         viewModelScope.launch {
-            repository.resetCycle()
+            currentRepository.value.resetCycle()
         }
     }
 
