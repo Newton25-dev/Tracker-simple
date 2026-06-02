@@ -1,0 +1,6 @@
+{
+  "name": "Resistance Tracker",
+  "description": "A 28-day cycle habit tracker for resistance training, featuring rest day auto-scheduling and sleep-based recovery rule.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
