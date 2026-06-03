@@ -92,8 +92,22 @@ fun MainScreen(viewModel: TrackerViewModel) {
     // Compute current day of cycle and check if completed (more than 28 days have elapsed)
     val currentDayOfCycle = remember(cycleMetadata) {
         if (cycleMetadata?.startDateMillis != null) {
-            val diff = System.currentTimeMillis() - cycleMetadata!!.startDateMillis
-            val calculated = (diff / (24 * 60 * 60 * 1000)).toInt()
+            val startCal = java.util.Calendar.getInstance().apply {
+                timeInMillis = cycleMetadata!!.startDateMillis
+                set(java.util.Calendar.HOUR_OF_DAY, 0)
+                set(java.util.Calendar.MINUTE, 0)
+                set(java.util.Calendar.SECOND, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }
+            val todayCal = java.util.Calendar.getInstance().apply {
+                timeInMillis = System.currentTimeMillis()
+                set(java.util.Calendar.HOUR_OF_DAY, 0)
+                set(java.util.Calendar.MINUTE, 0)
+                set(java.util.Calendar.SECOND, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }
+            val diffMillis = todayCal.timeInMillis - startCal.timeInMillis
+            val calculated = (diffMillis / (24 * 60 * 60 * 1000)).toInt()
             (calculated + 1).coerceIn(1, 28)
         } else {
             1
@@ -102,8 +116,22 @@ fun MainScreen(viewModel: TrackerViewModel) {
 
     val isCycleCompleted = remember(cycleMetadata) {
         if (cycleMetadata?.startDateMillis != null) {
-            val diff = System.currentTimeMillis() - cycleMetadata!!.startDateMillis
-            val calculated = (diff / (24 * 60 * 60 * 1000)).toInt()
+            val startCal = java.util.Calendar.getInstance().apply {
+                timeInMillis = cycleMetadata!!.startDateMillis
+                set(java.util.Calendar.HOUR_OF_DAY, 0)
+                set(java.util.Calendar.MINUTE, 0)
+                set(java.util.Calendar.SECOND, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }
+            val todayCal = java.util.Calendar.getInstance().apply {
+                timeInMillis = System.currentTimeMillis()
+                set(java.util.Calendar.HOUR_OF_DAY, 0)
+                set(java.util.Calendar.MINUTE, 0)
+                set(java.util.Calendar.SECOND, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }
+            val diffMillis = todayCal.timeInMillis - startCal.timeInMillis
+            val calculated = (diffMillis / (24 * 60 * 60 * 1000)).toInt()
             calculated >= 28
         } else {
             false
@@ -1086,7 +1114,6 @@ fun DayGridCellItem(
     }
 
     val borderStroke = when {
-        isToday -> BorderStroke(2.5.dp, if (isDarkMode) Color(0xFFFBBF24) else Color(0xFFEA580C))
         isDone -> BorderStroke(1.dp, if (isDarkMode) Color(0xFF047857) else Color(0xFFBBF7D0))
         isRest -> BorderStroke(1.5.dp, if (isDarkMode) Color(0xFFB45309).copy(alpha = 0.5f) else Color(0xFFFDE68A))
         else -> BorderStroke(2.dp, if (isDarkMode) Color(0xFF818CF8) else Color(0xFFC7D2FE))
@@ -1125,34 +1152,34 @@ fun DayGridCellItem(
                 textAlign = TextAlign.Center
             )
  
-            // Huge day index number with highlighted container if today
+            // Huge day index number with subtle gold dot if today
             Box(
                 contentAlignment = Alignment.Center,
-                modifier = if (isToday) {
-                    Modifier
-                        .size(31.dp)
-                        .background(
-                            color = if (isDarkMode) Color(0xFFFBBF24).copy(alpha = 0.2f) else Color(0xFFF59E0B).copy(alpha = 0.15f),
-                            shape = CircleShape
-                        )
-                        .border(
-                            width = 1.5.dp,
-                            color = if (isDarkMode) Color(0xFFFBBF24) else Color(0xFFEA580C),
-                            shape = CircleShape
-                        )
-                } else {
-                    Modifier
-                }
+                modifier = Modifier
             ) {
-                Text(
-                    text = "$dayNum",
-                    fontSize = if (isToday) 15.sp else 19.sp,
-                    fontWeight = FontWeight.Black,
-                    color = if (isToday) {
-                        if (isDarkMode) Color(0xFFFBBF24) else Color(0xFFC2410C)
-                    } else contentColor,
-                    textAlign = TextAlign.Center
-                )
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = "$dayNum",
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.Black,
+                        color = contentColor,
+                        textAlign = TextAlign.Center
+                    )
+                    if (isToday) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(5.dp)
+                                .background(
+                                    color = if (isDarkMode) Color(0xFFFBBF24) else Color(0xFFF59E0B),
+                                    shape = CircleShape
+                                )
+                        )
+                    }
+                }
             }
  
             // Tiny indicator label at bottom
